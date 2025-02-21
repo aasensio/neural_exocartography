@@ -1,8 +1,4 @@
 import numpy as np
-import matplotlib.pyplot as pl
-import healpy as hp
-from opensimplex import OpenSimplex
-import exocartographer
 from tqdm import tqdm
 import scipy.sparse.linalg
 
@@ -35,6 +31,11 @@ def tikhonov(Phi, y, theta=0.01, iter=2000):
     return x
 
 if (__name__ == '__main__'):
+
+    import healpy as hp
+    from opensimplex import OpenSimplex
+    import exocartographer
+    import matplotlib.pyplot as pl
 
     pl.close('all')
 

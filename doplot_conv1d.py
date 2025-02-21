@@ -1,10 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as pl
 import torch
-import model
 import model_denoise
-import glob
-import os
 import exocartographer
 import healpy as hp
 import tikhonov
@@ -15,6 +12,7 @@ import zarr
 from PIL import Image
 import subprocess
 import cartopy.feature as cfeature
+from opensimplex import OpenSimplex
 
 
 def simplex_noise(noise, x, y, z, freq, weight):
@@ -577,8 +575,8 @@ class Testing(object):
 
 
     def doplot_examples(self):
-        f_surf = zarr.open('training_surfaces_libnoise.zarr', 'r')
-        f_clouds = zarr.open('training_clouds.zarr', 'r')
+        f_surf = zarr.open('/scratch/Dropbox/THEORY/planet_cartography/training_surfaces_libnoise.zarr', 'r')
+        f_clouds = zarr.open('/scratch/Dropbox/THEORY/planet_cartography/training_clouds.zarr', 'r')
         f, ax = pl.subplots(nrows=3, ncols=3, figsize=(10,7))
 
         for i in range(3):
@@ -688,10 +686,10 @@ class Testing(object):
             
 if (__name__ == '__main__'):
     
-    deepnet = Testing(gpu=2, checkpoint_1d='trained_denoise_1d/2020-10-14-08:23:11.pth', checkpoint_2d='trained_denoise_2d/2020-10-26-16:34:23.pth', K1d=15, K2d=15, model_type='denoise')
+    deepnet = Testing(gpu=0, checkpoint_1d='trained_denoise_1d/2020-10-14-08:23:11.pth', checkpoint_2d='trained_denoise_2d/2020-10-26-16:34:23.pth', K1d=15, K2d=15, model_type='denoise')
     
-    # deepnet.doplot(which=0)
+    deepnet.doplot(which=0)
     # deepnet.doplot(which=1)
     
     # deepnet.doplot_earth()    
-    deepnet.doplot_examples()
+    # deepnet.doplot_examples()

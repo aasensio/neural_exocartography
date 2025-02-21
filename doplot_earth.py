@@ -78,7 +78,7 @@ class Testing(object):
             hp.visufunc.projplot(coast[i][0,:], coast[i][1,:], 'grey', lonlat=True, linewidth=0.5)
 
 
-    def evaluate_earth(self, measurement_std=0.001, theta_tik=0.01, cloud_type='generate', year=2004, pov='faceon'):
+    def evaluate_earth(self, measurement_std=0.001, theta_tik=0.01, cloud_type='none', year=2004, pov='faceon'):
         
         # Set orbital properties
         p_rotation = 23.934
@@ -136,51 +136,7 @@ class Testing(object):
         epoch_duration = nobs_per_epoch * cadence
         n_epochs = int(p_orbit / 24.0 / epoch_duration_days)
         epoch_starts = [epoch_duration_days*24*j for j in range(n_epochs)]
-
-        if (cloud_type == 'generate'):
-            simulated_clouds = np.zeros((n_epochs, npix))
-            n_octaves = 5    
-
-            print("Generating clouds...")
-            for k in tqdm(range(n_epochs)):
-                seed = 123+k
-                noises = [None] * n_octaves
-                for i in range(n_octaves):        
-                    noises[i] = OpenSimplex(seed=seed+i)
-                for i in range(npix):
-                    freq = 1.0
-                    persistence = 1.0
-                    for j in range(n_octaves):
-                        simulated_clouds[k, i] += billow_noise(noises[j], x[i], y[i], z[i], freq, persistence)
-                        freq *= 1.65
-                        persistence *= 0.5
-
-            thr = 0.3
-            mx = np.max(simulated_clouds)
-            mn = np.min(simulated_clouds)
-            simulated_clouds = (simulated_clouds - mn) / (mx - mn)
-            simulated_clouds[simulated_clouds < thr] = 0.0
-
-            mx = np.max(simulated_clouds[simulated_clouds > thr])
-            mn = np.min(simulated_clouds[simulated_clouds > thr])
-            simulated_clouds[simulated_clouds > thr] = (simulated_clouds[simulated_clouds > thr] - mn) / (mx - mn)
-
-        if (cloud_type == 'earth'):
-            simulated_clouds = np.zeros((n_epochs, npix))
-            lat_clouds = 90. - 180.0 / 64.0 * np.arange(64)
-            lon_clouds = -180 + 360.0 / 128.0 * np.arange(128)
-
-            LON_clouds, LAT_clouds = np.meshgrid(lon_clouds, lat_clouds)
-
-            ind_clouds = hp.ang2pix(nside, LON_clouds, LAT_clouds, lonlat=True)
-
-            print("Generating clouds from Earth observations...")
-            d = datetime.date(year, 1, 1)
-            for k in tqdm(range(n_epochs)):
-                clouds = np.loadtxt(f'clouds_earth/T42_{d.year}.{d.month:02d}.{d.day:02d}_davg.dat')
-                simulated_clouds[k, ind_clouds] = 0.7 * (clouds / 100.0)**1
-                d += datetime.timedelta(days=epoch_duration_days)
-
+        
         times = np.array([])
         for epoch_start in epoch_starts:
             epoch_times = np.linspace(epoch_start,
@@ -203,23 +159,25 @@ class Testing(object):
         truth.fix_params(true_params)
         p = np.concatenate([np.zeros(truth.nparams), simulated_map])
 
-        Phi = truth.visibility_illumination_matrix(p)
+        Phi_np = truth.visibility_illumination_matrix(p)[None, :, :]
 
-        largest_eval = scipy.sparse.linalg.eigsh(Phi.T @ Phi, k=1, which='LM', return_eigenvectors=False)       
-        rho = 0.4 / largest_eval[0]
-                        
-        Phi_split = Phi.reshape((n_epochs, nobs_per_epoch, npix))
-        
-        d_split = np.zeros((n_epochs, nobs_per_epoch))
-        for i in range(n_epochs):
-            d_split[i, :] = Phi_split[i, : ,:] @ (simulated_clouds[i, :] + (1.0 - simulated_clouds[i, :])**2 * simulated_map) + measurement_std * np.random.randn(nobs_per_epoch)
-            # d_split[i, :] = Phi_split[i, : ,:] @ (simulated_map + (0.7 - simulated_map) * simulated_clouds[i, :] / 0.7) + measurement_std * np.random.randn(nobs_per_epoch)
+        PhiT_Phi = Phi_np[0, :, :].T @ Phi_np[0, :, :]
+        largest_eval = scipy.sparse.linalg.eigsh(PhiT_Phi, k=1, which='LM', return_eigenvectors=False)
+        rho = 0.4 / largest_eval
+        rho = torch.tensor(rho.astype('float32')).to(self.device)
 
-        self.surf0 = torch.zeros((1, 3072)).to(self.device)
-        self.clouds0 = torch.zeros((1, n_epochs, 3072)).to(self.device)
-        Phi_split = torch.tensor(Phi_split[None, :, :, :].astype('float32')).to(self.device)
-        rho = torch.tensor(rho[None].astype('float32')).to(self.device)
-        d_split = torch.tensor(d_split[None, :, :].astype('float32')).to(self.device)
+        Phi = torch.tensor(Phi_np.astype('float32')).to(self.device)
+        PhiT = torch.transpose(Phi, 1, 2)
+
+        n = len(times)
+        light = truth.lightcurve(p)
+        light += measurement_std * np.random.randn(n)
+
+        light = torch.tensor(light[None, :, None].astype('float32')).to(self.device)
+
+        np.random.seed(123)
+        self.x0 = torch.tensor(np.random.rand(1, 3072).astype('float32')).to(self.device)
+        self.x0 = torch.zeros((1, 3072)).to(self.device)
                 
         self.model_1d.eval()
         self.model_2d.eval()
@@ -227,109 +185,51 @@ class Testing(object):
         with torch.no_grad():
                         
             start = time.time()
-            surf_1d, clouds_1d, out_surface_1d, out_clouds_1d = self.model_1d(d_split, self.surf0, self.clouds0, Phi_split, rho, n_epochs=n_epochs)
+            out_surface_1d, _ = self.model_1d(light, self.x0, Phi, PhiT, rho)
             print(f'Elapsed time 1D : {time.time()-start}')
 
             start = time.time()
-            surf_2d, clouds_2d, out_surface_2d, out_clouds_2d = self.model_2d(d_split, self.surf0, self.clouds0, Phi_split, rho, n_epochs=n_epochs)            
+            out_surface_2d, _ = self.model_2d(light, self.x0, Phi, PhiT, rho)
             print(f'Elapsed time 2D : {time.time()-start}')            
         
-        out_surface_1d = out_surface_1d[-1].squeeze().cpu().numpy()
-        out_clouds_1d = out_clouds_1d[-1].squeeze().cpu().numpy()
-        out_surface_2d = out_surface_2d[-1].squeeze().cpu().numpy()
-        out_clouds_2d = out_clouds_2d[-1].squeeze().cpu().numpy()
-        Phi_split = Phi_split.cpu().numpy()
-
+        out_surface_1d = out_surface_1d[-1].squeeze().cpu().numpy()        
+        out_surface_2d = out_surface_2d[-1].squeeze().cpu().numpy()        
+        
         
         # import ipdb
         # ipdb.set_trace()
 
-        return simulated_map, simulated_clouds, out_surface_1d, out_surface_2d, out_clouds_1d, out_clouds_2d, Phi_split
+        return simulated_map, out_surface_1d, out_surface_2d
 
     def doplot_earth_single(self):
 
         pov = 'faceon'
 
-        f, ax = pl.subplots(nrows=5, ncols=4, figsize=(15,12))
+        f, ax = pl.subplots(nrows=1, ncols=3, figsize=(15,8))
 
         space = 0.03
-        pos_up = ax[0,0].get_position().bounds
-        pos_down = ax[-1,0].get_position().bounds
+        pos_up = ax[0].get_position().bounds
+        pos_down = ax[-1].get_position().bounds
         delta = (pos_up[1] + pos_up[2] - pos_down[1] - space) / 5.0
 
-        for i in range(5):
-            for j in range(4):
-                pts = ax[i,j].get_position().bounds
-                if (i >= 1):
-                    new_pts = [pts[0], pos_up[1] - i * delta - space, delta, pts[3]]
-                else:
-                    new_pts = [pts[0], pos_up[1] - i * delta, delta, pts[3]]
-                if (j == 0):
-                    print(pts, '->',  new_pts)
-                ax[i,j].set_position(new_pts)
             
-        simulated_map,simulated_clouds, out_surface_1d, out_surface_2d, out_clouds_1d, out_clouds_2d, Phi_np = self.evaluate_earth(measurement_std=0.001, pov=pov)
+        simulated_map, out_surface_1d, out_surface_2d = self.evaluate_earth(measurement_std=0.001, pov=pov)
 
                        
-        pl.axes(ax[0,0])
+        pl.axes(ax[0])
         hp.mollview(simulated_map, hold=True, title='Original', cmap=pl.cm.viridis, rot=0, flip='geo')
         self.draw_earth_continents()
-        pl.axes(ax[0,1])
+        pl.axes(ax[1])
         hp.mollview(out_surface_1d, hold=True, title='Reconstructed 1D', cmap=pl.cm.viridis, rot=0, flip='geo')
         self.draw_earth_continents()
-        pl.axes(ax[0,2])
+        pl.axes(ax[2])
         hp.mollview(out_surface_2d, hold=True, title='Reconstructed 2D', cmap=pl.cm.viridis, rot=0, flip='geo')
         self.draw_earth_continents()
-        pl.axes(ax[0,3])
-        weight = np.sum(Phi_np, axis=(0,1,2))
-        hp.mollview(weight / np.max(weight), hold=True, title='Weight', cmap=pl.cm.viridis, rot=0, flip='geo')
-        
-        indices = np.floor(np.linspace(0,51,8)).astype('int')
-        loop = 0
-        for i in range(2):
-            for j in range(4):
-                week = indices[loop]
-                pl.axes(ax[1+2*i, j])
-                hp.mollview(simulated_clouds[week, :], hold=True, title=f'Original clouds week {week}', cmap=pl.cm.viridis, rot=0, flip='geo')
-                pl.axes(ax[1+2*i+1, j])
-                hp.mollview(out_clouds_2d[week, :], hold=True, title=f'Inferred clouds week {week}', cmap=pl.cm.viridis, rot=0, flip='geo')
-                loop += 1
-
-            
+                            
         pl.show()
 
-        pl.savefig(f'earth_clouds_realistic_{pov}.pdf', bbox_inches='tight')
-
-        simulated_clouds_mean = np.mean(simulated_clouds, axis=0)
-        simulated_clouds_std = np.std(simulated_clouds, axis=0)
-        
-        weight = np.mean(Phi_np, axis=2)[0, :, :]
-        out_clouds_2d_mean, out_clouds_2d_std = weighted_avg_and_std(out_clouds_2d, weight, axis=0)
-
-        breakpoint()
-
-        f, ax = pl.subplots(nrows=2, ncols=2, figsize=(10,7))
-        pl.axes(ax[0,0])
-        hp.mollview(simulated_clouds_mean, hold=True, title='Original clouds mean', cmap=pl.cm.viridis, rot=0, flip='geo')
-        self.draw_earth_continents()
-
-        pl.axes(ax[0,1])
-        hp.mollview(simulated_clouds_std / simulated_clouds_mean, hold=True, title='Original clouds variability', cmap=pl.cm.viridis, rot=0, flip='geo')
-        self.draw_earth_continents()
-
-        pl.axes(ax[1,0])
-        hp.mollview(out_clouds_2d_mean, hold=True, title='Inferred clouds mean', cmap=pl.cm.viridis, rot=0, flip='geo')
-        self.draw_earth_continents()
-
-        pl.axes(ax[1,1])
-        hp.mollview(out_clouds_2d_std / out_clouds_2d_mean, hold=True, title='Inferred clouds variability', cmap=pl.cm.viridis, rot=0, flip='geo')
-        self.draw_earth_continents()
-
-        pl.show()
-
-        pl.savefig(f'clouds_statistics_{pov}.pdf')
-
-        
+        # pl.savefig(f'earth_clouds_realistic_{pov}.pdf', bbox_inches='tight')
+      
 
             
 if (__name__ == '__main__'):
