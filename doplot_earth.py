@@ -2,7 +2,8 @@ import numpy as np
 import matplotlib.pyplot as pl
 import torch
 import model_denoise as model
-import exocartographer
+from projection import IlluminationMapPosterior, logit
+# import exocartographer
 import healpy as hp
 import pandas as pd
 import time
@@ -56,7 +57,7 @@ class Testing(object):
             print("=> loaded checkpoint '{}'".format(self.checkpoint_1d))    
             print(f"rho : {checkpoint['state_dict']['rho']}")
 
-            # Load model 1D. First define the network and then load the weights
+            # Load model 2D. First define the network and then load the weights
             self.model_2d = model.Network(K=self.K2d, L=32, NSIDE=16, device=self.device, model_class='conv2d').to(self.device)        
             print('N. total parameters 2D : {0}'.format(sum(p.numel() for p in self.model_2d.parameters() if p.requires_grad)))
             print("=> loading checkpoint '{}'".format(self.checkpoint_2d))
@@ -157,23 +158,23 @@ class Testing(object):
             times = np.concatenate([times, epoch_times])
 
         # Use exocartographer to compute the illumination map of the Earth at different times        
-        truth = exocartographer.IlluminationMapPosterior(times, np.zeros_like(times),
+        truth = IlluminationMapPosterior(times, np.zeros_like(times),
                                         measurement_std, nside=nside, nside_illum=nside)
-
+                
         # Orginal parameters of the Earth
         true_params = {
             'log_orbital_period':np.log(p_orbit),
             'log_rotation_period':np.log(p_rotation),
-            'logit_cos_inc':exocartographer.util.logit(np.cos(inclination)),
-            'logit_cos_obl':exocartographer.util.logit(np.cos(obliquity)),
-            'logit_phi_orb':exocartographer.util.logit(phi_orb, low=0, high=2*np.pi),
-            'logit_obl_orientation':exocartographer.util.logit(phi_rot, low=0, high=2*np.pi)}
+            'logit_cos_inc':logit(np.cos(inclination)),
+            'logit_cos_obl':logit(np.cos(obliquity)),
+            'logit_phi_orb':logit(phi_orb, low=0, high=2*np.pi),
+            'logit_obl_orientation':logit(phi_rot, low=0, high=2*np.pi)}
         truth.fix_params(true_params)
         p = np.concatenate([np.zeros(truth.nparams), simulated_map])
 
         # Get the illumination matrix that transforms the albedo map into the lightcurve
         Phi_np = truth.visibility_illumination_matrix(p)[None, :, :]
-
+        
         # Compute the Tikhonov regularization parameter
         PhiT_Phi = Phi_np[0, :, :].T @ Phi_np[0, :, :]
         largest_eval = scipy.sparse.linalg.eigsh(PhiT_Phi, k=1, which='LM', return_eigenvectors=False)
@@ -187,7 +188,7 @@ class Testing(object):
         # Generate the lightcurve. This essentially computes the product of Phi and the albedo map
         n = len(times)
         light = truth.lightcurve(p)
-
+        
         # Add noise to the lightcurve
         light += measurement_std * np.random.randn(n)
 
