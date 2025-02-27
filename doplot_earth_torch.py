@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as pl
 import torch
 import model_denoise as model
-from projection_simple import IlluminationMapPosterior, logit
+from projection_torch import IlluminationMapPosterior, logit
 # import exocartographer
 import healpy as hp
 import pandas as pd
@@ -10,6 +10,7 @@ import time
 import scipy.sparse.linalg
 from tqdm import tqdm
 import cartopy.feature as cfeature
+import torch
 
 def simplex_noise(noise, x, y, z, freq, weight):
     return weight * (noise.noise3(x*freq, y*freq, z*freq) / 2.0 + 0.5)
@@ -36,7 +37,7 @@ class Testing(object):
         self.cuda = torch.cuda.is_available()
         self.gpu = gpu
         self.device = torch.device(f"cuda:{self.gpu}" if self.cuda else "cpu")
-
+        
         self.K1d = K1d
         self.K2d = K2d
         self.model_type = model_type
@@ -87,6 +88,8 @@ class Testing(object):
 
 
     def evaluate_earth(self, measurement_std=0.001, theta_tik=0.01, cloud_type='none', year=2004, pov='faceon'):
+
+        torch.set_default_tensor_type(torch.FloatTensor)
         
         # Set orbital properties
         p_rotation = 23.934
@@ -97,18 +100,18 @@ class Testing(object):
         self.pov = pov
 
         if (self.pov == 'faceon'):
-            inclination = 0 * np.pi/180.0 #0.001#np.pi/2
-            obliquity = 89.99 * np.pi/180.0
+            inclination = 0 * torch.pi/180.0 #0.001#np.pi/2
+            obliquity = 89.99 * torch.pi/180.0
         
         if (self.pov == 'edgeon'):
-            inclination = 90 * np.pi/180.0 #0.001#np.pi/2
-            obliquity = 23. * np.pi/180.0
+            inclination = 90 * torch.pi/180.0 #0.001#np.pi/2
+            obliquity = 23. * torch.pi/180.0
 
         if (self.pov == 'edgeon_zero'):
-            inclination = 90 * np.pi/180.0 #0.001#np.pi/2
-            obliquity = 0.001 * np.pi/180.0
+            inclination = 90 * torch.pi/180.0 #0.001#np.pi/2
+            obliquity = 0.001 * torch.pi/180.0
 
-        phi_rot = np.pi/2.0
+        phi_rot = torch.pi/2.0
 
         # Define the Earth's surface in healpix pixels
         nside = 16
@@ -141,6 +144,8 @@ class Testing(object):
         simulated_map = hp.sphtfunc.smoothing(simulated_map, fwhm=0.06)
         simulated_map[simulated_map < 0] = 0.0
 
+        simulated_map = torch.tensor(simulated_map.astype('float32')).to(self.device)
+
         # Observation schedule. Each epoch is one week.
         epoch_duration_days = 7
         cadence = 5.0 # hours
@@ -157,29 +162,29 @@ class Testing(object):
             times = np.concatenate([times, epoch_times])
 
         # Use exocartographer to compute the illumination map of the Earth at different times        
-        truth = IlluminationMapPosterior(times, np.zeros_like(times),
-                                        measurement_std, nside=nside, nside_illum=nside)
+        times = torch.tensor(times).to(self.device)
+        truth = IlluminationMapPosterior(times, torch.zeros_like(times),
+                                        measurement_std, nside=nside, nside_illum=nside, device=self.device)
                 
         # Orginal parameters of the Earth
         true_params = {
-            'log_orbital_period':np.log(p_orbit),
-            'log_rotation_period':np.log(p_rotation),
-            'logit_cos_inc':logit(np.cos(inclination)),
-            'logit_cos_obl':logit(np.cos(obliquity)),
-            'logit_phi_orb':logit(phi_orb, low=0, high=2*np.pi),
-            'logit_obl_orientation':logit(phi_rot, low=0, high=2*np.pi)}
+            'log_orbital_period':torch.log(torch.tensor(p_orbit)).to(self.device),
+            'log_rotation_period':torch.log(torch.tensor(p_rotation)).to(self.device),
+            'logit_cos_inc':logit(torch.cos(torch.tensor(inclination))).to(self.device),
+            'logit_cos_obl':logit(torch.cos(torch.tensor(obliquity))).to(self.device),
+            'logit_phi_orb':logit(torch.tensor(phi_orb), low=0, high=2*np.pi).to(self.device),
+            'logit_obl_orientation':logit(torch.tensor(phi_rot), low=0, high=2*np.pi).to(self.device)}
                 
         # Get the illumination matrix that transforms the albedo map into the lightcurve
-        Phi_np = truth.visibility_illumination_matrix(true_params)[None, :, :]
+        Phi = truth.visibility_illumination_matrix(true_params)[None, :, :]
         
         # Compute the Tikhonov regularization parameter
-        PhiT_Phi = Phi_np[0, :, :].T @ Phi_np[0, :, :]
-        largest_eval = scipy.sparse.linalg.eigsh(PhiT_Phi, k=1, which='LM', return_eigenvectors=False)
+        PhiT_Phi = Phi[0, :, :].T @ Phi[0, :, :]
+        largest_eval = scipy.sparse.linalg.eigsh(PhiT_Phi.cpu().numpy(), k=1, which='LM', return_eigenvectors=False)
         rho = 0.4 / largest_eval
         rho = torch.tensor(rho.astype('float32')).to(self.device)
 
-        # Move the illumination matrix and its transpose to the device
-        Phi = torch.tensor(Phi_np.astype('float32')).to(self.device)
+        # Move the illumination matrix and its transpose to the device        
         PhiT = torch.transpose(Phi, 1, 2)
 
         # Generate the lightcurve. This essentially computes the product of Phi and the albedo map
@@ -187,10 +192,10 @@ class Testing(object):
         light = truth.lightcurve(true_params, simulated_map)
         
         # Add noise to the lightcurve
-        light += measurement_std * np.random.randn(n)
+        light += measurement_std * torch.randn(n).to(self.device)
 
         # Move the lightcurve to the device
-        light = torch.tensor(light[None, :, None].astype('float32')).to(self.device)
+        light = light[None, :, None]
 
         # Initial estimation of the albedo map
         np.random.seed(123)
@@ -206,7 +211,7 @@ class Testing(object):
                         
             start = time.time()
 
-            # Evaluate the models
+            # Evaluate the models        
             out_surface_1d, _ = self.model_1d(light, self.x0, Phi, PhiT, rho)
             print(f'Elapsed time 1D : {time.time()-start}')
 
@@ -214,10 +219,10 @@ class Testing(object):
             out_surface_2d, _ = self.model_2d(light, self.x0, Phi, PhiT, rho)
             print(f'Elapsed time 2D : {time.time()-start}')            
         
-        out_surface_1d = out_surface_1d[-1].squeeze().cpu().numpy()        
-        out_surface_2d = out_surface_2d[-1].squeeze().cpu().numpy()        
+        out_surface_1d = out_surface_1d[-1].squeeze()
+        out_surface_2d = out_surface_2d[-1].squeeze()
                 
-        return simulated_map, out_surface_1d, out_surface_2d
+        return simulated_map.cpu().numpy(), out_surface_1d.cpu().numpy(), out_surface_2d.cpu().numpy()
 
     def doplot_earth_single(self):
 

@@ -456,14 +456,13 @@ class IlluminationMapPosterior(object):
 
             R_\mathrm{inv} = R_y(-\mathrm{obl}) R_z(-\phi_\mathrm{rot}) R_S(-\omega_\mathrm{rot})
 
-        """
-
+        """        
         p = self.to_params(p)
-
+        
         phi_orb = inv_logit(p['logit_phi_orb'], 0.0, 2.0*np.pi)
         cos_phi_orb = np.cos(phi_orb)
         sin_phi_orb = np.sin(phi_orb)
-
+        
         omega_orb = 2.0*np.pi/np.exp(p['log_orbital_period'])
 
         no = self._observer_normal_orbit_coords(p)

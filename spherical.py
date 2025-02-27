@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import healpy as hp
 import matplotlib.pyplot as pl
 import numpy as np
+import glob
 
 class sphericalConv(nn.Module):
     def __init__(self, NSIDE, in_channels, out_channels, bias=True, nest=True):
@@ -17,18 +18,30 @@ class sphericalConv(nn.Module):
 
         self.NSIDE = NSIDE
         self.npix = hp.nside2npix(self.NSIDE)
+        
+        files = glob.glob('neighbours_*.npy')
+        found = False
+        for f in files:
+            nside = int(f.split('_')[1].split('.')[0])
+            if nside == NSIDE:
+                found = True                
+                self.neighbours = np.load(f)
 
-        self.neighbours = torch.zeros(9 * self.npix, dtype=torch.long)
-        for i in range(self.npix):
-            # neighbours = [i]
-            # neighbours.extend(hp.pixelfunc.get_all_neighbours(self.NSIDE, i, nest=nest))
-            
-            neighbours = hp.pixelfunc.get_all_neighbours(self.NSIDE, i, nest=nest)
-            neighbours = np.insert(neighbours, 4, i)
+        if not found:
+            print(f"Computing neighbours for NSIDE={NSIDE}")
+            self.neighbours = torch.zeros(9 * self.npix, dtype=torch.long)
+            for i in range(self.npix):
+                # neighbours = [i]
+                # neighbours.extend(hp.pixelfunc.get_all_neighbours(self.NSIDE, i, nest=nest))
+                
+                neighbours = hp.pixelfunc.get_all_neighbours(self.NSIDE, i, nest=nest)
+                neighbours = np.insert(neighbours, 4, i)
 
-            neighbours[neighbours == -1] = neighbours[4]
+                neighbours[neighbours == -1] = neighbours[4]
 
-            self.neighbours[9*i:9*i+9] = torch.tensor(neighbours)
+                self.neighbours[9*i:9*i+9] = torch.tensor(neighbours)
+
+            np.save(f'neighbours_{NSIDE}.npy', self.neighbours)
 
         self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=9, stride=9, bias=bias)
 
